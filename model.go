@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -53,7 +54,11 @@ type previewMsg struct {
 	lines    []string
 	rawLines []string // original file content
 	isMd     bool
+	gif      *animatedGif // non-nil for animated GIFs
 }
+
+// gifTickMsg triggers the next GIF frame.
+type gifTickMsg struct{}
 
 type model struct {
 	root          *node
@@ -76,6 +81,9 @@ type model struct {
 	selectStartY    int
 	selectEndY      int
 	selectionActive bool
+
+	// animated gif
+	activeGif *animatedGif
 
 	// edit mode
 	editMode bool
@@ -118,16 +126,30 @@ func (m *model) requestPreview() tea.Cmd {
 	m.cachedLines = []string{dimStyle.Render("  Loading...")}
 	m.loadingPreview = true
 	m.previewScroll = 0
+	m.activeGif = nil
 
 	_, previewOuterW := m.layoutWidths()
 	pw := previewOuterW - 6
 	if pw < 20 {
 		pw = 20
 	}
+	ph := m.height - 6
+	if ph < 5 {
+		ph = 5
+	}
 
 	return func() tea.Msg {
 		ext := strings.ToLower(filepath.Ext(path))
 		isMd := ext == ".md" || ext == ".markdown"
+
+		// Animated GIF — decode all frames
+		if isGifFile(ext) {
+			ag := loadAnimatedGif(path, pw, ph)
+			if ag != nil {
+				lines := strings.Split(ag.CurrentFrame(), "\n")
+				return previewMsg{path: path, lines: lines, gif: ag}
+			}
+		}
 
 		// Read raw file content for clipboard
 		var rawLines []string
@@ -136,7 +158,7 @@ func (m *model) requestPreview() tea.Cmd {
 		}
 
 		// Render for display
-		result := renderPreview(path, pw)
+		result := renderPreview(path, pw, ph)
 		rendered := strings.Split(result, "\n")
 		if !isMd {
 			for i, line := range rendered {
@@ -171,6 +193,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadingPreview = false
 			m.selectionActive = false
 			m.selecting = false
+			m.activeGif = msg.gif
+			if msg.gif != nil && len(msg.gif.frames) > 1 {
+				// Start animation tick
+				delay := msg.gif.delays[0]
+				return m, tea.Tick(delay, func(time.Time) tea.Msg { return gifTickMsg{} })
+			}
+		}
+		return m, nil
+
+	case gifTickMsg:
+		if m.activeGif != nil && len(m.activeGif.frames) > 1 {
+			delay := m.activeGif.Advance()
+			// Update cached lines with current frame
+			m.cachedLines = strings.Split(m.activeGif.CurrentFrame(), "\n")
+			return m, tea.Tick(delay, func(time.Time) tea.Msg { return gifTickMsg{} })
 		}
 		return m, nil
 

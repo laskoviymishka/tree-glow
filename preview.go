@@ -21,7 +21,7 @@ var numStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 // renderPreview returns the full rendered content for a file.
 // Called once per file selection, cached by the model.
-func renderPreview(path string, width int) string {
+func renderPreview(path string, width, height int) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return dimStyle.Render("  Cannot read: " + err.Error())
@@ -33,6 +33,12 @@ func renderPreview(path string, width int) string {
 
 	if !info.Mode().IsRegular() {
 		return dimStyle.Render("  Not a regular file")
+	}
+
+	// Images — handle before size/binary checks
+	ext := strings.ToLower(filepath.Ext(path))
+	if isImageFile(ext) {
+		return renderImage(path, width, height)
 	}
 
 	if info.Size() > maxFileSize {
@@ -53,7 +59,6 @@ func renderPreview(path string, width int) string {
 	}
 
 	content := string(data)
-	ext := strings.ToLower(filepath.Ext(path))
 
 	if ext == ".md" || ext == ".markdown" {
 		return renderMarkdown(content, width)

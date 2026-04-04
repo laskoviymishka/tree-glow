@@ -8,11 +8,13 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
 
 var (
 	treeWidthRatio = 0.25
@@ -71,11 +73,16 @@ type model struct {
 	loadingPreview   bool
 
 	// selection state
-	selecting    bool
-	selectStartY int // content line index (in cachedLines)
-	selectEndY   int
-	selectionActive bool // true when there's a visible selection
+	selecting       bool
+	selectStartY    int
+	selectEndY      int
+	selectionActive bool
 
+	// edit mode
+	editMode     bool
+	editPath     string
+	editTextarea textarea.Model
+	editDirty    bool // has unsaved changes
 }
 
 func newModel(rootPath string) model {
@@ -144,6 +151,11 @@ func (m *model) requestPreview() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Edit mode — route everything to textarea except save/quit
+	if m.editMode {
+		return m.updateEditMode(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -214,6 +226,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g":
 			m.cursor = 0
 			m.previewScroll = 0
+		case "e":
+			if m.cursor < len(m.visible) && !m.visible[m.cursor].isDir {
+				return m, m.enterEditMode()
+			}
 		case "esc":
 			m.selectionActive = false
 			m.selecting = false
@@ -330,6 +346,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
+	}
+
+	if m.editMode {
+		return m.viewEditMode()
 	}
 
 	innerH := m.height - 3
@@ -557,6 +577,145 @@ func (m model) selectionRange() (int, int) {
 		s, e = e, s
 	}
 	return s, e
+}
+
+// --- Edit mode ---
+
+func (m *model) enterEditMode() tea.Cmd {
+	path := m.visible[m.cursor].path
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	_, previewOuterW := m.layoutWidths()
+	editW := previewOuterW - 4
+	editH := m.height - 5
+	if editW < 20 {
+		editW = 20
+	}
+	if editH < 3 {
+		editH = 3
+	}
+
+	ta := textarea.New()
+	ta.SetValue(string(data))
+	ta.SetWidth(editW)
+	ta.SetHeight(editH)
+	ta.ShowLineNumbers = true
+	ta.Focus()
+	ta.CharLimit = 0 // no limit
+
+	m.editMode = true
+	m.editPath = path
+	m.editTextarea = ta
+	m.editDirty = false
+
+	return ta.Focus()
+}
+
+func (m model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		_, previewOuterW := m.layoutWidths()
+		m.editTextarea.SetWidth(previewOuterW - 4)
+		m.editTextarea.SetHeight(m.height - 5)
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+s":
+			// Save file
+			content := m.editTextarea.Value()
+			if err := os.WriteFile(m.editPath, []byte(content), 0644); err == nil {
+				m.editDirty = false
+			}
+			return m, nil
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			// Exit edit mode
+			m.editMode = false
+			m.cachedPath = "" // force preview reload
+			m.cachedLines = nil
+			m.cachedRawLines = nil
+			return m, nil
+		}
+	}
+
+	// Forward to textarea
+	oldVal := m.editTextarea.Value()
+	var cmd tea.Cmd
+	m.editTextarea, cmd = m.editTextarea.Update(msg)
+	if m.editTextarea.Value() != oldVal {
+		m.editDirty = true
+	}
+	return m, cmd
+}
+
+var (
+	editTitleStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("166")).
+			Foreground(lipgloss.Color("230")).
+			Bold(true).
+			Padding(0, 1)
+
+	editTitleCleanStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("34")).
+				Foreground(lipgloss.Color("230")).
+				Bold(true).
+				Padding(0, 1)
+)
+
+func (m model) viewEditMode() string {
+	treeOuterW, previewOuterW := m.layoutWidths()
+	treeInnerW := treeOuterW - 2
+	innerH := m.height - 3
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	// Tree (same as normal view)
+	treeContent := buildExactLines(m.buildTreeLines(treeInnerW, innerH), innerH, treeInnerW)
+	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeContent)
+
+	// Edit panel
+	previewInnerW := previewOuterW - 2
+
+	// Title bar
+	indicator := "EDIT"
+	titleSt := editTitleCleanStyle
+	if m.editDirty {
+		indicator = "EDIT *"
+		titleSt = editTitleStyle
+	}
+	titleText := indicator + "  " + truncate(m.editPath, previewInnerW-len(indicator)-4)
+	header := titleSt.Width(previewOuterW).Render(titleText)
+
+	// Textarea
+	editContent := m.editTextarea.View()
+	editPanel := borderStyle.Width(previewInnerW).Height(innerH-1).MaxWidth(previewOuterW).MaxHeight(innerH+1).Render(editContent)
+
+	previewPanel := lipgloss.JoinVertical(lipgloss.Left, header, editPanel)
+	main := lipgloss.JoinHorizontal(lipgloss.Top, treePanel, " ", previewPanel)
+
+	// Status bar
+	left := " ctrl+s:save  esc:cancel  ctrl+c:quit"
+	right := ""
+	if m.editDirty {
+		right = " modified "
+	}
+	gap := m.width - len(left) - len(right)
+	if gap < 0 {
+		left = ansi.Truncate(left, m.width-len(right)-1, "…")
+		gap = 0
+	}
+	status := statusStyle.Render(left + strings.Repeat(" ", gap) + right)
+
+	full := main + "\n" + status
+	return hardClip(full, m.width, m.height)
 }
 
 func (m *model) reloadTree() {

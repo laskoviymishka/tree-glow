@@ -1,0 +1,7 @@
+Plain text file for testing non-highlighted preview.
+
+Things to check:
+- Does the tree expand correctly?
+- Is scroll working in the preview pane?
+- Do markdown files render nicely?
+- Are code files syntax highlighted?

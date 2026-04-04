@@ -1,0 +1,16 @@
+app:
+  name: tree-glow
+  version: 0.1.0
+  theme: dracula
+
+preview:
+  max_file_size: 1MB
+  syntax_highlight: true
+  markdown_render: true
+
+keybindings:
+  navigate_up: k
+  navigate_down: j
+  expand: enter
+  collapse: h
+  quit: q

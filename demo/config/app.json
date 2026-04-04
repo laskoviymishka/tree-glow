@@ -1,0 +1,11 @@
+{
+  "name": "tree-glow",
+  "description": "A minimal TUI file manager",
+  "author": "andrei",
+  "dependencies": {
+    "bubbletea": "^1.3.0",
+    "lipgloss": "^1.1.0",
+    "glamour": "^1.0.0",
+    "chroma": "^2.23.0"
+  }
+}

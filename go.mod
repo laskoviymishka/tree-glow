@@ -1,4 +1,4 @@
-module github.com/andrei-tserakhau/tree-glow
+module github.com/laskoviymishka/tree-glow
 
 go 1.26
 

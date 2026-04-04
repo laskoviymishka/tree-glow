@@ -9,13 +9,13 @@ Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Glam
 ## Install
 
 ```bash
-go install github.com/andrei-tserakhau/tree-glow@latest
+go install github.com/laskoviymishka/tree-glow@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/andrei-tserakhau/tree-glow.git
+git clone https://github.com/laskoviymishka/tree-glow.git
 cd tree-glow
 go build -o tree-glow .
 ```

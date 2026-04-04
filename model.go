@@ -54,8 +54,8 @@ type previewMsg struct {
 	lines    []string
 	rawLines []string // original file content
 	isMd     bool
-	gif      *animatedGif   // non-nil for animated GIFs
-	kitty    *kittyImageState // non-nil for kitty static images
+	gif   *animatedGif     // non-nil for half-block animated GIFs
+	kitty *kittyImageState // non-nil for kitty static images
 }
 
 // gifTickMsg triggers the next GIF frame.
@@ -147,7 +147,7 @@ func (m *model) requestPreview() tea.Cmd {
 		ext := strings.ToLower(filepath.Ext(path))
 		isMd := ext == ".md" || ext == ".markdown"
 
-		// Animated GIF — decode all frames (half-block, works everywhere)
+		// Animated GIF — always use half-blocks (kitty clear+redraw flickers)
 		if isGifFile(ext) {
 			ag := loadAnimatedGif(path, pw, ph)
 			if ag != nil {
@@ -227,7 +227,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case gifTickMsg:
 		if m.activeGif != nil && len(m.activeGif.frames) > 1 {
 			delay := m.activeGif.Advance()
-			// Update cached lines with current frame
 			m.cachedLines = strings.Split(m.activeGif.CurrentFrame(), "\n")
 			return m, tea.Tick(delay, func(time.Time) tea.Msg { return gifTickMsg{} })
 		}
@@ -491,13 +490,21 @@ func (m model) View() string {
 	// SAFETY: hard clip to exactly m.height rows x m.width cols
 	clipped := hardClip(full, m.width, m.height)
 
-	// Kitty image overlay — always clear, redraw if present.
-	// Appended AFTER hardClip so escape sequences are never mangled.
+	// Kitty image overlay — appended AFTER hardClip to avoid mangling.
+	// Only clear when no kitty content is active (navigated away).
+	// Animation frames overwrite in-place without clearing.
 	if useKitty {
-		clipped += kittyClearImages()
+		treeOuterW, _ := m.layoutWidths()
+		imgRow := 3
+		imgCol := treeOuterW + 3
+		overlay := ""
 		if m.kittyImg != nil {
-			treeOuterW, _ := m.layoutWidths()
-			clipped += m.kittyImg.OverlayString(3, treeOuterW+3)
+			overlay = m.kittyImg.OverlayString(imgRow, imgCol)
+		}
+		if overlay != "" {
+			clipped += overlay
+		} else {
+			clipped += kittyClearImages()
 		}
 	}
 

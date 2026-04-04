@@ -57,7 +57,7 @@ func newKittyImage(path string, width, height int) (*kittyImageState, error) {
 		imgH:     img.Bounds.Dy(),
 		rendered: rendered,
 		renderW:  width,
-		renderH:  height,
+		renderH:  fitH,
 	}, nil
 }
 

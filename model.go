@@ -43,6 +43,13 @@ var (
 			Foreground(lipgloss.Color("241"))
 )
 
+// previewMsg is sent when async preview rendering completes.
+type previewMsg struct {
+	path  string
+	lines []string
+	isMd  bool
+}
+
 type model struct {
 	root          *node
 	visible       []*node
@@ -53,9 +60,10 @@ type model struct {
 	previewScroll int
 	showHidden    bool
 
-	cachedPath    string
-	cachedLines   []string
+	cachedPath       string
+	cachedLines      []string
 	cachedIsMarkdown bool
+	loadingPreview   bool
 }
 
 func newModel(rootPath string) model {
@@ -77,34 +85,41 @@ func (m model) layoutWidths() (treeOuterW, previewOuterW int) {
 	return
 }
 
-func (m *model) refreshPreviewCache() {
+// requestPreview kicks off async preview if needed. Returns a tea.Cmd or nil.
+func (m *model) requestPreview() tea.Cmd {
 	if m.cursor >= len(m.visible) {
 		m.cachedPath = ""
 		m.cachedLines = nil
-		return
+		m.loadingPreview = false
+		return nil
 	}
 	path := m.visible[m.cursor].path
 	if path == m.cachedPath && m.cachedLines != nil {
-		return
+		return nil
 	}
+	// Show loading state immediately
+	m.cachedPath = path
+	m.cachedLines = []string{dimStyle.Render("  Loading...")}
+	m.loadingPreview = true
+	m.previewScroll = 0
+
 	_, previewOuterW := m.layoutWidths()
 	pw := previewOuterW - 6
 	if pw < 20 {
 		pw = 20
 	}
-	ext := strings.ToLower(filepath.Ext(path))
-	m.cachedIsMarkdown = ext == ".md" || ext == ".markdown"
-	result := renderPreview(path, pw)
-	m.cachedPath = path
-	raw := strings.Split(result, "\n")
-	if m.cachedIsMarkdown {
-		m.cachedLines = raw
-	} else {
-		// Pre-truncate code lines to prevent lipgloss word-wrap
-		m.cachedLines = make([]string, len(raw))
-		for i, line := range raw {
-			m.cachedLines[i] = ansi.Truncate(line, pw, "")
+
+	return func() tea.Msg {
+		ext := strings.ToLower(filepath.Ext(path))
+		isMd := ext == ".md" || ext == ".markdown"
+		result := renderPreview(path, pw)
+		raw := strings.Split(result, "\n")
+		if !isMd {
+			for i, line := range raw {
+				raw[i] = ansi.Truncate(line, pw, "")
+			}
 		}
+		return previewMsg{path: path, lines: raw, isMd: isMd}
 	}
 }
 
@@ -113,7 +128,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.cachedPath = ""
+		m.cachedPath = "" // invalidate cache on resize
+
+	case previewMsg:
+		// Async preview render completed — only accept if still on the same file
+		if msg.path == m.cachedPath {
+			m.cachedLines = msg.lines
+			m.cachedIsMarkdown = msg.isMd
+			m.loadingPreview = false
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -209,7 +233,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 	}
 
-	m.refreshPreviewCache()
+	cmd := m.requestPreview()
 
 	// clamp preview scroll
 	innerH := m.height - 4 // border top/bottom + title + status
@@ -239,7 +263,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.treeScroll = m.cursor - treeH + 1
 	}
 
-	return m, nil
+	return m, cmd
 }
 
 func (m model) View() string {

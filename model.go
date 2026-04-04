@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
@@ -79,10 +78,8 @@ type model struct {
 	selectionActive bool
 
 	// edit mode
-	editMode     bool
-	editPath     string
-	editTextarea textarea.Model
-	editDirty    bool // has unsaved changes
+	editMode bool
+	editor   *editor
 }
 
 func newModel(rootPath string) model {
@@ -297,7 +294,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if previewContentY >= 0 && previewContentY < len(m.cachedLines) {
 					m.selectEndY = previewContentY
 				}
-				go m.copyToClipboard() // async to avoid blocking UI
+				// Capture values for goroutine to avoid data race
+				startY, endY := m.selectionRange()
+				isMd := m.cachedIsMarkdown
+				cachedLines := m.cachedLines
+				rawLines := m.cachedRawLines
+				go copyToClipboard(startY, endY, isMd, cachedLines, rawLines)
 			}
 		}
 	}
@@ -520,11 +522,8 @@ func (m model) buildTreeLines(width, height int) []string {
 }
 
 // copyToClipboard copies selected text to system clipboard.
-// For code files: uses raw source lines (no line numbers, no ANSI).
-// For markdown: uses rendered text stripped of ANSI (since glamour changes line structure).
-// Safe to call from a goroutine.
-func (m *model) copyToClipboard() {
-	startY, endY := m.selectStartY, m.selectEndY
+// Safe to call from a goroutine — all data passed by value.
+func copyToClipboard(startY, endY int, isMd bool, cachedLines, rawLines []string) {
 	if startY > endY {
 		startY, endY = endY, startY
 	}
@@ -533,28 +532,26 @@ func (m *model) copyToClipboard() {
 	}
 
 	var text string
-	if m.cachedIsMarkdown || len(m.cachedRawLines) == 0 {
-		// Markdown or no raw lines: use rendered text stripped of ANSI
-		if endY >= len(m.cachedLines) {
-			endY = len(m.cachedLines) - 1
+	if isMd || len(rawLines) == 0 {
+		if endY >= len(cachedLines) {
+			endY = len(cachedLines) - 1
 		}
 		if startY > endY {
 			return
 		}
 		var lines []string
 		for i := startY; i <= endY; i++ {
-			lines = append(lines, ansi.Strip(m.cachedLines[i]))
+			lines = append(lines, ansi.Strip(cachedLines[i]))
 		}
 		text = strings.Join(lines, "\n")
 	} else {
-		// Code: use raw source lines
-		if endY >= len(m.cachedRawLines) {
-			endY = len(m.cachedRawLines) - 1
+		if endY >= len(rawLines) {
+			endY = len(rawLines) - 1
 		}
 		if startY > endY {
 			return
 		}
-		text = strings.Join(m.cachedRawLines[startY:endY+1], "\n")
+		text = strings.Join(rawLines[startY:endY+1], "\n")
 	}
 
 	var cmd *exec.Cmd
@@ -583,13 +580,8 @@ func (m model) selectionRange() (int, int) {
 
 func (m *model) enterEditMode() tea.Cmd {
 	path := m.visible[m.cursor].path
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-
 	_, previewOuterW := m.layoutWidths()
-	editW := previewOuterW - 4
+	editW := previewOuterW - 6
 	editH := m.height - 5
 	if editW < 20 {
 		editW = 20
@@ -598,20 +590,13 @@ func (m *model) enterEditMode() tea.Cmd {
 		editH = 3
 	}
 
-	ta := textarea.New()
-	ta.SetValue(string(data))
-	ta.SetWidth(editW)
-	ta.SetHeight(editH)
-	ta.ShowLineNumbers = true
-	ta.Focus()
-	ta.CharLimit = 0 // no limit
-
+	ed, err := newEditor(path, editW, editH)
+	if err != nil {
+		return nil
+	}
 	m.editMode = true
-	m.editPath = path
-	m.editTextarea = ta
-	m.editDirty = false
-
-	return ta.Focus()
+	m.editor = ed
+	return nil
 }
 
 func (m model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -619,55 +604,86 @@ func (m model) updateEditMode(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		_, previewOuterW := m.layoutWidths()
-		m.editTextarea.SetWidth(previewOuterW - 4)
-		m.editTextarea.SetHeight(m.height - 5)
+		if m.editor != nil {
+			_, previewOuterW := m.layoutWidths()
+			m.editor.width = previewOuterW - 6
+			m.editor.height = m.height - 5
+		}
 		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+s":
-			// Save file
-			content := m.editTextarea.Value()
-			if err := os.WriteFile(m.editPath, []byte(content), 0644); err == nil {
-				m.editDirty = false
+			if m.editor != nil {
+				if err := m.editor.Save(); err != nil {
+					// Stay in edit mode on error
+					return m, nil
+				}
 			}
-			return m, nil
+			m.editMode = false
+			m.editor = nil
+			m.cachedPath = ""
+			m.cachedLines = nil
+			m.cachedRawLines = nil
+			cmd := m.requestPreview()
+			return m, cmd
 		case "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			// Exit edit mode
 			m.editMode = false
-			m.cachedPath = "" // force preview reload
+			m.editor = nil
+			m.cachedPath = ""
 			m.cachedLines = nil
 			m.cachedRawLines = nil
+			cmd := m.requestPreview()
+			return m, cmd
+		default:
+			if m.editor != nil {
+				m.editor.Update(msg)
+			}
 			return m, nil
 		}
-	}
 
-	// Forward to textarea
-	oldVal := m.editTextarea.Value()
-	var cmd tea.Cmd
-	m.editTextarea, cmd = m.editTextarea.Update(msg)
-	if m.editTextarea.Value() != oldVal {
-		m.editDirty = true
+	case tea.MouseMsg:
+		if m.editor == nil {
+			return m, nil
+		}
+		treeW, _ := m.layoutWidths()
+		switch {
+		case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X >= treeW+2:
+			lineIdx := msg.Y - 3 + m.editor.scrollY // 3 = header + border top + title inside border
+			if lineIdx >= 0 && lineIdx < len(m.editor.lines) {
+				m.editor.cursorY = lineIdx
+				numW := len(fmt.Sprintf("%d", len(m.editor.lines)))
+				contentX := msg.X - treeW - 2 - numW - 2
+				if contentX < 0 {
+					contentX = 0
+				}
+				lineLen := len([]rune(m.editor.lines[lineIdx]))
+				if contentX > lineLen {
+					contentX = lineLen
+				}
+				m.editor.cursorX = contentX
+			}
+		case msg.Button == tea.MouseButtonWheelUp && msg.X >= treeW:
+			m.editor.scrollY -= 3
+			if m.editor.scrollY < 0 {
+				m.editor.scrollY = 0
+			}
+		case msg.Button == tea.MouseButtonWheelDown && msg.X >= treeW:
+			m.editor.scrollY += 3
+			maxScroll := len(m.editor.lines) - m.editor.height
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if m.editor.scrollY > maxScroll {
+				m.editor.scrollY = maxScroll
+			}
+		}
+		return m, nil
 	}
-	return m, cmd
+	return m, nil
 }
-
-var (
-	editTitleStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("166")).
-			Foreground(lipgloss.Color("230")).
-			Bold(true).
-			Padding(0, 1)
-
-	editTitleCleanStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("34")).
-				Foreground(lipgloss.Color("230")).
-				Bold(true).
-				Padding(0, 1)
-)
 
 func (m model) viewEditMode() string {
 	treeOuterW, previewOuterW := m.layoutWidths()
@@ -677,7 +693,7 @@ func (m model) viewEditMode() string {
 		innerH = 1
 	}
 
-	// Tree (same as normal view)
+	// Tree
 	treeContent := buildExactLines(m.buildTreeLines(treeInnerW, innerH), innerH, treeInnerW)
 	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeContent)
 
@@ -686,16 +702,23 @@ func (m model) viewEditMode() string {
 
 	// Title bar
 	indicator := "EDIT"
-	titleSt := editTitleCleanStyle
-	if m.editDirty {
+	titleSt := editTitleClean
+	if m.editor != nil && m.editor.dirty {
 		indicator = "EDIT *"
-		titleSt = editTitleStyle
+		titleSt = editTitleDirty
 	}
-	titleText := indicator + "  " + truncate(m.editPath, previewInnerW-len(indicator)-4)
+	editPath := ""
+	if m.editor != nil {
+		editPath = m.editor.path
+	}
+	titleText := indicator + "  " + truncate(editPath, previewInnerW-len(indicator)-4)
 	header := titleSt.Width(previewOuterW).Render(titleText)
 
-	// Textarea
-	editContent := m.editTextarea.View()
+	// Editor content with syntax highlighting
+	editContent := ""
+	if m.editor != nil {
+		editContent = m.editor.Render(previewInnerW)
+	}
 	editPanel := borderStyle.Width(previewInnerW).Height(innerH-1).MaxWidth(previewOuterW).MaxHeight(innerH+1).Render(editContent)
 
 	previewPanel := lipgloss.JoinVertical(lipgloss.Left, header, editPanel)
@@ -704,8 +727,11 @@ func (m model) viewEditMode() string {
 	// Status bar
 	left := " ctrl+s:save  esc:cancel  ctrl+c:quit"
 	right := ""
-	if m.editDirty {
+	if m.editor != nil && m.editor.dirty {
 		right = " modified "
+	}
+	if m.editor != nil {
+		right = fmt.Sprintf(" Ln %d, Col %d %s", m.editor.cursorY+1, m.editor.cursorX+1, right)
 	}
 	gap := m.width - len(left) - len(right)
 	if gap < 0 {

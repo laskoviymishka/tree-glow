@@ -441,7 +441,11 @@ func (m model) View() string {
 	// Title
 	previewTitle := ""
 	if m.cursor < len(m.visible) {
-		previewTitle = m.visible[m.cursor].path
+		rel, err := filepath.Rel(m.root.path, m.visible[m.cursor].path)
+		if err != nil {
+			rel = m.visible[m.cursor].path
+		}
+		previewTitle = rel
 	}
 	scrollInfo := ""
 	if len(m.cachedLines) > previewContentH {

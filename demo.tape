@@ -6,84 +6,130 @@ Set Width 1200
 Set Height 700
 Set Theme "Dracula"
 Set Padding 10
+Set TypingSpeed 50ms
 
+# Start directly in the app
+Hide
 Type "cd /Users/andrei.tserakhau/tree-glow && ./tree-glow demo/"
 Enter
-Sleep 1.5s
+Sleep 2s
+Show
 
-# Navigate the tree
-Type "j"
-Sleep 0.4s
-Type "j"
-Sleep 0.4s
-Type "j"
-Sleep 0.4s
+Sleep 1s
 
-# Expand a directory
+# Navigate down the tree
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+
+# Expand config/
 Type "l"
-Sleep 0.8s
+Sleep 0.6s
 Type "j"
-Sleep 0.4s
-Type "j"
-Sleep 0.4s
+Sleep 0.5s
 
-# Preview a Go file
-Type "j"
-Sleep 1.5s
+# Preview YAML
+Sleep 1.2s
 
-# Scroll the preview
+# Navigate to docs
+Type "h"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+
+# Expand docs/
+Type "l"
+Sleep 0.5s
+Type "j"
+Sleep 0.5s
+
+# Preview markdown (guide.md)
+Sleep 2s
+
+# Scroll preview
 Ctrl+d
 Sleep 1s
 Ctrl+u
 Sleep 1s
 
-# Navigate to markdown
-Type "g"
-Sleep 0.5s
+# Navigate to src
+Type "h"
+Sleep 0.3s
 Type "j"
-Sleep 0.5s
-# Go to README.md
+Sleep 0.3s
+
+# Expand src/
+Type "l"
+Sleep 0.3s
+
+# Expand components/
+Type "j"
+Sleep 0.3s
 Type "l"
 Sleep 0.3s
 Type "j"
+Sleep 0.5s
+
+# Preview TSX file
 Sleep 1.5s
 
-# Scroll markdown
-Ctrl+d
-Sleep 1s
-Ctrl+u
-Sleep 1s
-
-# Navigate to a code file and enter edit mode
-Type "g"
-Sleep 0.3s
-Type "j"
-Sleep 0.3s
-Type "j"
+# Navigate to Python file
+Type "h"
 Sleep 0.3s
 Type "j"
 Sleep 0.3s
 Type "l"
 Sleep 0.3s
 Type "j"
-Sleep 0.3s
-Type "j"
-Sleep 0.3s
-Type "j"
-Sleep 1s
+Sleep 0.5s
+
+# Preview Python
+Sleep 1.5s
 
 # Enter edit mode
 Type "e"
 Sleep 1.5s
 
-# Type something
-Type "// edited with tree-glow!"
+# Type a comment
+Type "# edited in tree-glow!"
+Enter
 Sleep 1s
 
-# Exit without saving
+# Exit edit mode
 Escape
+Sleep 1s
+
+# Go to top
+Type "g"
+Sleep 0.5s
+
+# Preview README.md
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 0.3s
+Type "j"
+Sleep 1.5s
+
+# Scroll the markdown
+Ctrl+d
+Sleep 1s
+Ctrl+u
 Sleep 1s
 
 # Quit
 Type "q"
-Sleep 0.5s
+Sleep 0.3s

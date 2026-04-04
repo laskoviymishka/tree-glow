@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -45,9 +48,10 @@ var (
 
 // previewMsg is sent when async preview rendering completes.
 type previewMsg struct {
-	path  string
-	lines []string
-	isMd  bool
+	path     string
+	lines    []string
+	rawLines []string // original file content
+	isMd     bool
 }
 
 type model struct {
@@ -62,8 +66,16 @@ type model struct {
 
 	cachedPath       string
 	cachedLines      []string
+	cachedRawLines   []string // original file content, no rendering
 	cachedIsMarkdown bool
 	loadingPreview   bool
+
+	// selection state
+	selecting    bool
+	selectStartY int // content line index (in cachedLines)
+	selectEndY   int
+	selectionActive bool // true when there's a visible selection
+
 }
 
 func newModel(rootPath string) model {
@@ -94,7 +106,7 @@ func (m *model) requestPreview() tea.Cmd {
 		return nil
 	}
 	path := m.visible[m.cursor].path
-	if path == m.cachedPath && m.cachedLines != nil {
+	if path == m.cachedPath && m.cachedLines != nil && !m.loadingPreview {
 		return nil
 	}
 	// Show loading state immediately
@@ -112,14 +124,22 @@ func (m *model) requestPreview() tea.Cmd {
 	return func() tea.Msg {
 		ext := strings.ToLower(filepath.Ext(path))
 		isMd := ext == ".md" || ext == ".markdown"
+
+		// Read raw file content for clipboard
+		var rawLines []string
+		if data, err := os.ReadFile(path); err == nil {
+			rawLines = strings.Split(string(data), "\n")
+		}
+
+		// Render for display
 		result := renderPreview(path, pw)
-		raw := strings.Split(result, "\n")
+		rendered := strings.Split(result, "\n")
 		if !isMd {
-			for i, line := range raw {
-				raw[i] = ansi.Truncate(line, pw, "")
+			for i, line := range rendered {
+				rendered[i] = ansi.Truncate(line, pw, "")
 			}
 		}
-		return previewMsg{path: path, lines: raw, isMd: isMd}
+		return previewMsg{path: path, lines: rendered, rawLines: rawLines, isMd: isMd}
 	}
 }
 
@@ -128,14 +148,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.cachedPath = "" // invalidate cache on resize
+		m.cachedPath = ""
+		m.cachedLines = nil
+		m.cachedRawLines = nil
+		m.selectionActive = false
+		m.selecting = false
 
 	case previewMsg:
-		// Async preview render completed — only accept if still on the same file
 		if msg.path == m.cachedPath {
 			m.cachedLines = msg.lines
+			m.cachedRawLines = msg.rawLines
 			m.cachedIsMarkdown = msg.isMd
 			m.loadingPreview = false
+			m.selectionActive = false
+			m.selecting = false
 		}
 		return m, nil
 
@@ -147,11 +173,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor > 0 {
 				m.cursor--
 				m.previewScroll = 0
+				m.selectionActive = false
 			}
 		case "down", "j":
 			if m.cursor < len(m.visible)-1 {
 				m.cursor++
 				m.previewScroll = 0
+				m.selectionActive = false
 			}
 		case "enter", "right", "l":
 			if m.cursor < len(m.visible) && m.visible[m.cursor].isDir {
@@ -186,31 +214,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "g":
 			m.cursor = 0
 			m.previewScroll = 0
+		case "esc":
+			m.selectionActive = false
+			m.selecting = false
 		}
 
 	case tea.MouseMsg:
 		treeW, _ := m.layoutWidths()
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
+		inPreview := msg.X >= treeW+2 // past tree border + gap
+		previewContentY := msg.Y - 2 + m.previewScroll // map screen Y to content line
+
+		switch {
+		case msg.Button == tea.MouseButtonWheelUp:
 			if msg.X < treeW {
 				if m.cursor > 0 {
 					m.cursor--
 					m.previewScroll = 0
+					m.selectionActive = false
 				}
 			} else {
 				m.previewScroll -= 3
 			}
-		case tea.MouseButtonWheelDown:
+		case msg.Button == tea.MouseButtonWheelDown:
 			if msg.X < treeW {
 				if m.cursor < len(m.visible)-1 {
 					m.cursor++
 					m.previewScroll = 0
+					m.selectionActive = false
 				}
 			} else {
 				m.previewScroll += 3
 			}
-		case tea.MouseButtonLeft:
-			if msg.X < treeW && len(m.visible) > 0 {
+		case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+			if inPreview && previewContentY >= 0 && previewContentY < len(m.cachedLines) {
+				// Start selection in preview
+				m.selecting = true
+				m.selectionActive = true
+				m.selectStartY = previewContentY
+				m.selectEndY = previewContentY
+			} else if msg.X < treeW && len(m.visible) > 0 {
+				// Click in tree
+				m.selectionActive = false
+				m.selecting = false
 				row := msg.Y - 1
 				idx := m.treeScroll + row
 				if idx >= 0 && idx < len(m.visible) {
@@ -221,6 +266,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.visible = flatten(m.root)
 					}
 				}
+			}
+		case msg.Action == tea.MouseActionMotion && m.selecting:
+			// Drag — extend selection
+			if previewContentY >= 0 && previewContentY < len(m.cachedLines) {
+				m.selectEndY = previewContentY
+			}
+		case msg.Action == tea.MouseActionRelease && m.selecting:
+			m.selecting = false
+			if !inPreview {
+				// Released outside preview — cancel
+				m.selectionActive = false
+			} else {
+				if previewContentY >= 0 && previewContentY < len(m.cachedLines) {
+					m.selectEndY = previewContentY
+				}
+				go m.copyToClipboard() // async to avoid blocking UI
 			}
 		}
 	}
@@ -271,13 +332,6 @@ func (m model) View() string {
 		return "Loading..."
 	}
 
-	// Layout budget:
-	//   border top + border bottom = 2 rows
-	//   status bar = 1 row
-	//   inner content = m.height - 3 rows
-	// Both panels share the same outer height = m.height - 1 (minus status)
-	// Inner height for both = m.height - 3
-
 	innerH := m.height - 3
 	if innerH < 1 {
 		innerH = 1
@@ -323,8 +377,8 @@ func (m model) View() string {
 	}
 	titleText := truncate(previewTitle, previewInnerW-len(scrollInfo)-2) + scrollInfo
 
-	// Preview content: exactly previewContentH lines
-	previewSlice := sliceExact(m.cachedLines, m.previewScroll, previewContentH)
+	// Preview content: exactly previewContentH lines, with selection highlight
+	previewSlice := m.sliceWithSelection(m.previewScroll, previewContentH)
 
 	// Build preview inner: title + content, total = innerH lines
 	previewInner := titleStyle.Width(previewInnerW).Render(titleText) + "\n" + previewSlice
@@ -332,7 +386,13 @@ func (m model) View() string {
 
 	// Compose
 	main := lipgloss.JoinHorizontal(lipgloss.Top, treePanel, " ", previewPanel)
-	left := " j/k:nav  enter:open  h:back  .:hidden  ctrl+d/u:scroll  q:quit"
+	var left string
+	if m.selectionActive {
+		selStart, selEnd := m.selectionRange()
+		left = fmt.Sprintf(" Copied %d lines  |  esc: clear", selEnd-selStart+1)
+	} else {
+		left = " j/k:nav  enter:open  h:back  .:hidden  ctrl+d/u:scroll  q:quit"
+	}
 	right := ""
 	if len(m.visible) > 0 {
 		right = fmt.Sprintf(" %d/%d ", m.cursor+1, len(m.visible))
@@ -365,6 +425,27 @@ func buildExactLines(lines []string, count, width int) string {
 
 // sliceExact extracts `count` lines starting at `offset`, pads to exact count,
 // truncates each to `width`.
+var selectHighlight = lipgloss.NewStyle().
+	Background(lipgloss.Color("24")).
+	Foreground(lipgloss.Color("255"))
+
+func (m model) sliceWithSelection(offset, count int) string {
+	selStart, selEnd := m.selectionRange()
+	out := make([]string, count)
+	for i := 0; i < count; i++ {
+		srcIdx := offset + i
+		if srcIdx >= 0 && srcIdx < len(m.cachedLines) {
+			line := m.cachedLines[srcIdx]
+			if m.selectionActive && srcIdx >= selStart && srcIdx <= selEnd {
+				// Strip existing ANSI and re-render with highlight
+				line = selectHighlight.Render(ansi.Strip(line))
+			}
+			out[i] = line
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 func sliceExact(lines []string, offset, count int) string {
 	out := make([]string, count)
 	for i := 0; i < count; i++ {
@@ -416,6 +497,66 @@ func (m model) buildTreeLines(width, height int) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// copyToClipboard copies selected text to system clipboard.
+// For code files: uses raw source lines (no line numbers, no ANSI).
+// For markdown: uses rendered text stripped of ANSI (since glamour changes line structure).
+// Safe to call from a goroutine.
+func (m *model) copyToClipboard() {
+	startY, endY := m.selectStartY, m.selectEndY
+	if startY > endY {
+		startY, endY = endY, startY
+	}
+	if startY < 0 {
+		startY = 0
+	}
+
+	var text string
+	if m.cachedIsMarkdown || len(m.cachedRawLines) == 0 {
+		// Markdown or no raw lines: use rendered text stripped of ANSI
+		if endY >= len(m.cachedLines) {
+			endY = len(m.cachedLines) - 1
+		}
+		if startY > endY {
+			return
+		}
+		var lines []string
+		for i := startY; i <= endY; i++ {
+			lines = append(lines, ansi.Strip(m.cachedLines[i]))
+		}
+		text = strings.Join(lines, "\n")
+	} else {
+		// Code: use raw source lines
+		if endY >= len(m.cachedRawLines) {
+			endY = len(m.cachedRawLines) - 1
+		}
+		if startY > endY {
+			return
+		}
+		text = strings.Join(m.cachedRawLines[startY:endY+1], "\n")
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	default:
+		return
+	}
+	cmd.Stdin = strings.NewReader(text)
+	cmd.Run()
+}
+
+// selectionRange returns the normalized (min, max) of the selection.
+func (m model) selectionRange() (int, int) {
+	s, e := m.selectStartY, m.selectEndY
+	if s > e {
+		s, e = e, s
+	}
+	return s, e
 }
 
 func (m *model) reloadTree() {

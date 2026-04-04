@@ -54,7 +54,8 @@ type previewMsg struct {
 	lines    []string
 	rawLines []string // original file content
 	isMd     bool
-	gif      *animatedGif // non-nil for animated GIFs
+	gif      *animatedGif   // non-nil for animated GIFs
+	kitty    *kittyImageState // non-nil for kitty static images
 }
 
 // gifTickMsg triggers the next GIF frame.
@@ -84,6 +85,9 @@ type model struct {
 
 	// animated gif
 	activeGif *animatedGif
+
+	// kitty image
+	kittyImg *kittyImageState
 
 	// edit mode
 	editMode bool
@@ -127,6 +131,7 @@ func (m *model) requestPreview() tea.Cmd {
 	m.loadingPreview = true
 	m.previewScroll = 0
 	m.activeGif = nil
+	m.kittyImg = nil
 
 	_, previewOuterW := m.layoutWidths()
 	pw := previewOuterW - 6
@@ -142,12 +147,28 @@ func (m *model) requestPreview() tea.Cmd {
 		ext := strings.ToLower(filepath.Ext(path))
 		isMd := ext == ".md" || ext == ".markdown"
 
-		// Animated GIF — decode all frames
+		// Animated GIF — decode all frames (half-block, works everywhere)
 		if isGifFile(ext) {
 			ag := loadAnimatedGif(path, pw, ph)
 			if ag != nil {
 				lines := strings.Split(ag.CurrentFrame(), "\n")
 				return previewMsg{path: path, lines: lines, gif: ag}
+			}
+		}
+
+		// Static images — try kitty protocol for pixel-perfect rendering
+		if isImageFile(ext) && !isGifFile(ext) && isKittyAvailable() {
+			ki, err := newKittyImage(path, pw, ph)
+			if err == nil {
+				// cachedLines just holds the header + blank space
+				// actual image is overlaid via escape sequences in View
+				header := ki.Header()
+				lines := []string{header, ""}
+				// Fill with blank lines so scroll math works
+				for i := 0; i < ph; i++ {
+					lines = append(lines, "")
+				}
+				return previewMsg{path: path, lines: lines, kitty: ki}
 			}
 		}
 
@@ -194,6 +215,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectionActive = false
 			m.selecting = false
 			m.activeGif = msg.gif
+			m.kittyImg = msg.kitty
 			if msg.gif != nil && len(msg.gif.frames) > 1 {
 				// Start animation tick
 				delay := msg.gif.delays[0]
@@ -467,7 +489,19 @@ func (m model) View() string {
 	full := main + "\n" + status
 
 	// SAFETY: hard clip to exactly m.height rows x m.width cols
-	return hardClip(full, m.width, m.height)
+	clipped := hardClip(full, m.width, m.height)
+
+	// Kitty image overlay — always clear, redraw if present.
+	// Appended AFTER hardClip so escape sequences are never mangled.
+	if useKitty {
+		clipped += kittyClearImages()
+		if m.kittyImg != nil {
+			treeOuterW, _ := m.layoutWidths()
+			clipped += m.kittyImg.OverlayString(3, treeOuterW+3)
+		}
+	}
+
+	return clipped
 }
 
 // buildExactLines takes rendered lines, pads/clips to exactly `count` lines,
@@ -482,8 +516,6 @@ func buildExactLines(lines []string, count, width int) string {
 	return strings.Join(out, "\n")
 }
 
-// sliceExact extracts `count` lines starting at `offset`, pads to exact count,
-// truncates each to `width`.
 var selectHighlight = lipgloss.NewStyle().
 	Background(lipgloss.Color("24")).
 	Foreground(lipgloss.Color("255"))
@@ -500,17 +532,6 @@ func (m model) sliceWithSelection(offset, count int) string {
 				line = selectHighlight.Render(ansi.Strip(line))
 			}
 			out[i] = line
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-func sliceExact(lines []string, offset, count int) string {
-	out := make([]string, count)
-	for i := 0; i < count; i++ {
-		srcIdx := offset + i
-		if srcIdx >= 0 && srcIdx < len(lines) {
-			out[i] = lines[srcIdx]
 		}
 	}
 	return strings.Join(out, "\n")

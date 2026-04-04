@@ -9,10 +9,11 @@ import (
 )
 
 func main() {
-	root, err := filepath.Abs(".")
+	arg := "."
 	if len(os.Args) > 1 {
-		root, err = filepath.Abs(os.Args[1])
+		arg = os.Args[1]
 	}
+	root, err := filepath.Abs(arg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

@@ -17,6 +17,8 @@ import (
 
 const maxFileSize = 1 << 20 // 1MB
 
+var numStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+
 // renderPreview returns the full rendered content for a file.
 // Called once per file selection, cached by the model.
 func renderPreview(path string, width int) string {
@@ -27,6 +29,10 @@ func renderPreview(path string, width int) string {
 
 	if info.IsDir() {
 		return renderDirPreview(path)
+	}
+
+	if !info.Mode().IsRegular() {
+		return dimStyle.Render("  Not a regular file")
 	}
 
 	if info.Size() > maxFileSize {
@@ -57,6 +63,9 @@ func renderPreview(path string, width int) string {
 }
 
 func renderMarkdown(content string, width int) string {
+	if width < 10 {
+		width = 10
+	}
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
 		glamour.WithWordWrap(width-4),
@@ -82,7 +91,13 @@ func renderCode(path, content string) string {
 	lexer = chroma.Coalesce(lexer)
 
 	style := styles.Get("dracula")
+	if style == nil {
+		style = styles.Fallback
+	}
 	formatter := formatters.Get("terminal256")
+	if formatter == nil {
+		return addLineNumbers(content)
+	}
 
 	iterator, err := lexer.Tokenise(nil, content)
 	if err != nil {
@@ -100,7 +115,6 @@ func renderCode(path, content string) string {
 func addLineNumbers(content string) string {
 	lines := strings.Split(content, "\n")
 	numWidth := len(fmt.Sprintf("%d", len(lines)))
-	numStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 	var buf strings.Builder
 	for i, line := range lines {

@@ -18,11 +18,6 @@ type node struct {
 	parent   *node
 }
 
-// loadChildren reads the directory and populates children (one level).
-func (n *node) loadChildren() error {
-	return n.loadChildrenFiltered(false)
-}
-
 func (n *node) loadChildrenFiltered(showHidden bool) error {
 	if !n.isDir {
 		return nil
@@ -37,17 +32,24 @@ func (n *node) loadChildrenFiltered(showHidden bool) error {
 		if !showHidden && strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
+		childPath := filepath.Join(n.path, e.Name())
+		isDir := e.IsDir()
+		// Follow symlinks to detect directories
+		if e.Type()&os.ModeSymlink != 0 {
+			if info, err := os.Stat(childPath); err == nil {
+				isDir = info.IsDir()
+			}
+		}
 		child := &node{
-			name:  e.Name(),
-			path:  filepath.Join(n.path, e.Name()),
-			isDir: e.IsDir(),
-			depth: n.depth + 1,
+			name:   e.Name(),
+			path:   childPath,
+			isDir:  isDir,
+			depth:  n.depth + 1,
 			parent: n,
 		}
 		n.children = append(n.children, child)
 	}
 
-	// sort: dirs first, then alphabetical
 	sort.Slice(n.children, func(i, j int) bool {
 		if n.children[i].isDir != n.children[j].isDir {
 			return n.children[i].isDir
@@ -60,13 +62,17 @@ func (n *node) loadChildrenFiltered(showHidden bool) error {
 // flatten returns a visible list of nodes for rendering.
 func flatten(n *node) []*node {
 	var result []*node
+	flattenInto(n, &result)
+	return result
+}
+
+func flattenInto(n *node, out *[]*node) {
 	for _, child := range n.children {
-		result = append(result, child)
-		if child.isDir && child.expanded {
-			result = append(result, flatten(child)...)
+		*out = append(*out, child)
+		if child.isDir && child.expanded && child.depth < 64 {
+			flattenInto(child, out)
 		}
 	}
-	return result
 }
 
 // toggle expands/collapses a directory node.
@@ -129,13 +135,17 @@ func fileIcon(name string) string {
 
 // newRootNode creates the root node for a given path.
 func newRootNode(path string, showHidden bool) *node {
+	info, err := os.Stat(path)
+	isDir := err == nil && info.IsDir()
 	root := &node{
 		name:     filepath.Base(path),
 		path:     path,
-		isDir:    true,
-		expanded: true,
+		isDir:    isDir,
+		expanded: isDir,
 		depth:    0,
 	}
-	root.loadChildrenFiltered(showHidden)
+	if isDir {
+		root.loadChildrenFiltered(showHidden)
+	}
 	return root
 }

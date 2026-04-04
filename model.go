@@ -65,6 +65,18 @@ func newModel(rootPath string) model {
 
 func (m model) Init() tea.Cmd { return nil }
 
+func (m model) layoutWidths() (treeOuterW, previewOuterW int) {
+	treeOuterW = int(float64(m.width) * treeWidthRatio)
+	if treeOuterW < 20 {
+		treeOuterW = 20
+	}
+	previewOuterW = m.width - treeOuterW - 1
+	if previewOuterW < 10 {
+		previewOuterW = 10
+	}
+	return
+}
+
 func (m *model) refreshPreviewCache() {
 	if m.cursor >= len(m.visible) {
 		m.cachedPath = ""
@@ -75,11 +87,8 @@ func (m *model) refreshPreviewCache() {
 	if path == m.cachedPath && m.cachedLines != nil {
 		return
 	}
-	treeW := int(float64(m.width) * treeWidthRatio)
-	if treeW < 20 {
-		treeW = 20
-	}
-	pw := m.width - treeW - 8
+	_, previewOuterW := m.layoutWidths()
+	pw := previewOuterW - 6
 	if pw < 20 {
 		pw = 20
 	}
@@ -156,7 +165,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		treeW := int(float64(m.width) * treeWidthRatio)
+		treeW, _ := m.layoutWidths()
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			if msg.X < treeW {
@@ -177,7 +186,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewScroll += 3
 			}
 		case tea.MouseButtonLeft:
-			if msg.X < treeW {
+			if msg.X < treeW && len(m.visible) > 0 {
 				row := msg.Y - 1
 				idx := m.treeScroll + row
 				if idx >= 0 && idx < len(m.visible) {
@@ -250,14 +259,12 @@ func (m model) View() string {
 		innerH = 1
 	}
 
-	treeOuterW := int(float64(m.width) * treeWidthRatio)
-	if treeOuterW < 20 {
-		treeOuterW = 20
-	}
-	treeInnerW := treeOuterW - 2 // border left + right
-
-	previewOuterW := m.width - treeOuterW - 1 // 1 gap
+	treeOuterW, previewOuterW := m.layoutWidths()
+	treeInnerW := treeOuterW - 2
 	previewInnerW := previewOuterW - 2
+	if previewInnerW < 4 {
+		previewInnerW = 4
+	}
 
 	// --- Tree: exactly innerH lines, each truncated to treeInnerW ---
 	treeContent := buildExactLines(m.buildTreeLines(treeInnerW, innerH), innerH, treeInnerW)
@@ -280,8 +287,11 @@ func (m model) View() string {
 	}
 	scrollInfo := ""
 	if len(m.cachedLines) > previewContentH {
-		bottomLine := m.previewScroll + previewContentH
-		pct := (bottomLine * 100) / len(m.cachedLines)
+		maxScroll := len(m.cachedLines) - previewContentH
+		pct := 0
+		if maxScroll > 0 {
+			pct = (m.previewScroll * 100) / maxScroll
+		}
 		if pct > 100 {
 			pct = 100
 		}
@@ -304,8 +314,10 @@ func (m model) View() string {
 		right = fmt.Sprintf(" %d/%d ", m.cursor+1, len(m.visible))
 	}
 	gap := m.width - len(left) - len(right)
-	if gap < 1 {
-		gap = 1
+	if gap < 0 {
+		// terminal too narrow — truncate hints
+		left = ansi.Truncate(left, m.width-len(right)-1, "…")
+		gap = 0
 	}
 	status := statusStyle.Render(left + strings.Repeat(" ", gap) + right)
 
@@ -405,18 +417,9 @@ func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
+	if ansi.StringWidth(s) <= maxLen {
 		return s
 	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-1] + "…"
+	return ansi.Truncate(s, maxLen-1, "…")
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}

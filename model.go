@@ -84,6 +84,13 @@ type model struct {
 	selectionActive bool
 	cursorMoved bool // cursor-follow only on keyboard nav
 
+	// search mode
+	searchMode    bool
+	searchQuery   string
+	searchFiles   []searchResult // all files (cached)
+	searchResults []searchResult // filtered matches
+	searchCursor  int
+
 	// animated gif
 	activeGif *animatedGif
 
@@ -192,9 +199,14 @@ func (m *model) requestPreview() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Edit mode — route everything to textarea except save/quit
+	// Edit mode
 	if m.editMode {
 		return m.updateEditMode(msg)
+	}
+
+	// Search mode
+	if m.searchMode {
+		return m.updateSearchMode(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -277,6 +289,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewScroll -= 20
 		case ".":
 			m.showHidden = !m.showHidden
+			m.searchFiles = nil // invalidate search cache
 			m.reloadTree()
 		case "G":
 			m.cursor = len(m.visible) - 1
@@ -290,6 +303,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.visible) && !m.visible[m.cursor].isDir {
 				return m, m.enterEditMode()
 			}
+		case "/":
+			m.searchMode = true
+			m.searchQuery = ""
+			m.searchCursor = 0
+			m.searchResults = nil
+			if m.searchFiles == nil {
+				m.searchFiles = walkFiles(m.root.path, m.showHidden)
+			}
+			return m, nil
 		case "esc":
 			m.selectionActive = false
 			m.selecting = false
@@ -434,30 +456,33 @@ func (m model) View() string {
 		previewInnerW = 4
 	}
 
-	// --- Tree: title + content ---
-	treeContentH := innerH - 1
-	if treeContentH < 1 {
-		treeContentH = 1
-	}
-
-	// Tree title with scroll bar
-	barWidth := 8
-	treeTitleText := truncate(filepath.Base(m.root.path), treeInnerW-barWidth-3)
-	if len(m.visible) > treeContentH {
-		maxTreeScroll := len(m.visible) - treeContentH
-		if maxTreeScroll < 1 {
-			maxTreeScroll = 1
+	// --- Tree panel (or search panel) ---
+	var treePanel string
+	if m.searchMode {
+		treePanel = m.viewSearch()
+	} else {
+		treeContentH := innerH - 1
+		if treeContentH < 1 {
+			treeContentH = 1
 		}
-		pct := (m.treeScroll * 100) / maxTreeScroll
-		if pct > 100 {
-			pct = 100
+		barWidth := 8
+		treeTitleText := truncate(filepath.Base(m.root.path), treeInnerW-barWidth-3)
+		if len(m.visible) > treeContentH {
+			maxTreeScroll := len(m.visible) - treeContentH
+			if maxTreeScroll < 1 {
+				maxTreeScroll = 1
+			}
+			pct := (m.treeScroll * 100) / maxTreeScroll
+			if pct > 100 {
+				pct = 100
+			}
+			treeTitleText += fmt.Sprintf(" %d%% %s", pct, scrollBar(pct, barWidth))
 		}
-		treeTitleText += fmt.Sprintf(" %d%% %s", pct, scrollBar(pct, barWidth))
+		treeTitle := titleStyle.Width(treeInnerW).Render(treeTitleText)
+		treeBody := buildExactLines(m.buildTreeLines(treeInnerW, treeContentH), treeContentH, treeInnerW)
+		treeInner := treeTitle + "\n" + treeBody
+		treePanel = borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeInner)
 	}
-	treeTitle := titleStyle.Width(treeInnerW).Render(treeTitleText)
-	treeBody := buildExactLines(m.buildTreeLines(treeInnerW, treeContentH), treeContentH, treeInnerW)
-	treeInner := treeTitle + "\n" + treeBody
-	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeInner)
 
 	// --- Preview: title + content ---
 	previewContentH := innerH - 1
@@ -499,11 +524,13 @@ func (m model) View() string {
 	// Compose
 	main := lipgloss.JoinHorizontal(lipgloss.Top, treePanel, " ", previewPanel)
 	var left string
-	if m.selectionActive {
+	if m.searchMode {
+		left = fmt.Sprintf(" /:search  enter:open  esc:cancel  (%d results)", len(m.searchResults))
+	} else if m.selectionActive {
 		selStart, selEnd := m.selectionRange()
 		left = fmt.Sprintf(" Copied %d lines  |  esc: clear", selEnd-selStart+1)
 	} else {
-		left = " j/k:nav  enter:open  h:back  .:hidden  ctrl+d/u:scroll  q:quit"
+		left = " j/k:nav  enter:open  h:back  /:search  ctrl+d/u:scroll  q:quit"
 	}
 	right := ""
 	if len(m.visible) > 0 {
@@ -839,6 +866,174 @@ func (m model) viewEditMode() string {
 
 	full := main + "\n" + status
 	return hardClip(full, m.width, m.height)
+}
+
+// --- Search mode ---
+
+func (m model) updateSearchMode(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.searchMode = false
+			return m, nil
+		case "enter":
+			if len(m.searchResults) == 0 || m.searchCursor >= len(m.searchResults) {
+				m.searchMode = false
+				return m, nil
+			}
+			m.navigateToFile(m.searchResults[m.searchCursor].absPath)
+			m.searchMode = false
+			return m, m.requestPreview()
+		case "up", "ctrl+p":
+			if m.searchCursor > 0 {
+				m.searchCursor--
+			}
+			return m, nil
+		case "down", "ctrl+n":
+			if m.searchCursor < len(m.searchResults)-1 {
+				m.searchCursor++
+			}
+			return m, nil
+		case "backspace":
+			if len(m.searchQuery) > 0 {
+				runes := []rune(m.searchQuery)
+				m.searchQuery = string(runes[:len(runes)-1])
+				m.searchResults = filterAndSort(m.searchFiles, m.searchQuery)
+				m.searchCursor = 0
+			}
+			return m, nil
+		default:
+			if len(msg.Runes) > 0 {
+				m.searchQuery += string(msg.Runes)
+				m.searchResults = filterAndSort(m.searchFiles, m.searchQuery)
+				m.searchCursor = 0
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+// navigateToFile expands all parent directories and moves cursor to the target file.
+func (m *model) navigateToFile(absPath string) {
+	// Build the chain of directories from root to target
+	rel, err := filepath.Rel(m.root.path, absPath)
+	if err != nil {
+		return
+	}
+	parts := strings.Split(filepath.Dir(rel), string(filepath.Separator))
+
+	// Expand each directory in the path
+	current := m.root
+	for _, part := range parts {
+		if part == "." {
+			continue
+		}
+		for _, child := range current.children {
+			if child.name == part && child.isDir {
+				if !child.expanded {
+					child.expanded = true
+					child.loadChildrenFiltered(m.showHidden)
+				}
+				current = child
+				break
+			}
+		}
+	}
+
+	// Rebuild visible list and find the target
+	m.visible = flatten(m.root)
+	for i, n := range m.visible {
+		if n.path == absPath {
+			m.cursor = i
+			m.previewScroll = 0
+			m.cursorMoved = true
+			break
+		}
+	}
+}
+
+var (
+	searchInputStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(lipgloss.Color("255")).
+				Padding(0, 1)
+
+	searchMatchStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
+
+	searchSelectedStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("62")).
+				Foreground(lipgloss.Color("230")).
+				Bold(true)
+
+	searchDimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241"))
+)
+
+func (m model) viewSearch() string {
+	treeOuterW, _ := m.layoutWidths()
+	treeInnerW := treeOuterW - 2
+	innerH := m.height - 3
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	// Search results in the tree panel area
+	resultH := innerH - 1 // minus search input row
+	if resultH < 1 {
+		resultH = 1
+	}
+
+	// Input bar
+	prompt := "/ " + m.searchQuery + "█"
+	inputBar := searchInputStyle.Width(treeInnerW).Render(truncate(prompt, treeInnerW))
+
+	// Results list
+	var resultLines []string
+	start := 0
+	if m.searchCursor >= resultH {
+		start = m.searchCursor - resultH + 1
+	}
+	end := start + resultH
+	if end > len(m.searchResults) {
+		end = len(m.searchResults)
+	}
+
+	for i := start; i < end; i++ {
+		r := m.searchResults[i]
+		line := " " + r.relPath
+		line = truncate(line, treeInnerW)
+
+		if i == m.searchCursor {
+			vis := ansi.StringWidth(line)
+			if vis < treeInnerW {
+				line += strings.Repeat(" ", treeInnerW-vis)
+			}
+			line = searchSelectedStyle.Render(line)
+		} else {
+			line = searchMatchStyle.Render(line)
+		}
+		resultLines = append(resultLines, line)
+	}
+
+	// Pad to fill
+	for len(resultLines) < resultH {
+		resultLines = append(resultLines, "")
+	}
+
+	treeInner := inputBar + "\n" + strings.Join(resultLines, "\n")
+	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeInner)
+
+	return treePanel
 }
 
 func (m *model) reloadTree() {

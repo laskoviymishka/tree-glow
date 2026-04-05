@@ -12,6 +12,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/glamour"
+	glamourstyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -71,8 +72,18 @@ func renderMarkdown(content string, width int) string {
 	if width < 10 {
 		width = 10
 	}
+
+	// Custom style based on dark with table borders
+	style := glamourstyles.DarkStyleConfig
+	col := "│"
+	row := "─"
+	cross := "┼"
+	style.Table.CenterSeparator = &cross
+	style.Table.ColumnSeparator = &col
+	style.Table.RowSeparator = &row
+
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStyles(style),
 		glamour.WithWordWrap(width-4),
 	)
 	if err != nil {

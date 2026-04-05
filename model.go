@@ -82,6 +82,7 @@ type model struct {
 	selectStartY    int
 	selectEndY      int
 	selectionActive bool
+	cursorMoved bool // cursor-follow only on keyboard nav
 
 	// animated gif
 	activeGif *animatedGif
@@ -241,12 +242,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 				m.previewScroll = 0
 				m.selectionActive = false
+				m.cursorMoved = true
 			}
 		case "down", "j":
 			if m.cursor < len(m.visible)-1 {
 				m.cursor++
 				m.previewScroll = 0
 				m.selectionActive = false
+				m.cursorMoved = true
 			}
 		case "enter", "right", "l":
 			if m.cursor < len(m.visible) && m.visible[m.cursor].isDir {
@@ -278,9 +281,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "G":
 			m.cursor = len(m.visible) - 1
 			m.previewScroll = 0
+			m.cursorMoved = true
 		case "g":
 			m.cursor = 0
 			m.previewScroll = 0
+			m.cursorMoved = true
 		case "e":
 			if m.cursor < len(m.visible) && !m.visible[m.cursor].isDir {
 				return m, m.enterEditMode()
@@ -298,20 +303,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case msg.Button == tea.MouseButtonWheelUp:
 			if msg.X < treeW {
-				if m.cursor > 0 {
-					m.cursor--
-					m.previewScroll = 0
-					m.selectionActive = false
+				m.treeScroll -= 3
+				if m.treeScroll < 0 {
+					m.treeScroll = 0
 				}
 			} else {
 				m.previewScroll -= 3
 			}
 		case msg.Button == tea.MouseButtonWheelDown:
 			if msg.X < treeW {
-				if m.cursor < len(m.visible)-1 {
-					m.cursor++
-					m.previewScroll = 0
-					m.selectionActive = false
+				m.treeScroll += 3
+				maxScroll := len(m.visible) - (m.height - 4)
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				if m.treeScroll > maxScroll {
+					m.treeScroll = maxScroll
 				}
 			} else {
 				m.previewScroll += 3
@@ -327,7 +334,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Click in tree
 				m.selectionActive = false
 				m.selecting = false
-				row := msg.Y - 1
+				row := msg.Y - 2 // border top + title row
 				idx := m.treeScroll + row
 				if idx >= 0 && idx < len(m.visible) {
 					m.cursor = idx
@@ -388,16 +395,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewScroll = 0
 	}
 
-	// tree scroll
+	// tree scroll — only follow cursor on keyboard nav
 	treeH := m.height - 4
 	if treeH < 1 {
 		treeH = 1
 	}
-	if m.cursor < m.treeScroll {
-		m.treeScroll = m.cursor
-	}
-	if m.cursor >= m.treeScroll+treeH {
-		m.treeScroll = m.cursor - treeH + 1
+	if m.cursorMoved {
+		m.cursorMoved = false
+		if m.cursor < m.treeScroll {
+			m.treeScroll = m.cursor
+		}
+		if m.cursor >= m.treeScroll+treeH {
+			m.treeScroll = m.cursor - treeH + 1
+		}
 	}
 
 	return m, cmd
@@ -424,15 +434,32 @@ func (m model) View() string {
 		previewInnerW = 4
 	}
 
-	// --- Tree: exactly innerH lines, each truncated to treeInnerW ---
-	treeContent := buildExactLines(m.buildTreeLines(treeInnerW, innerH), innerH, treeInnerW)
-	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeContent)
+	// --- Tree: title + content ---
+	treeContentH := innerH - 1
+	if treeContentH < 1 {
+		treeContentH = 1
+	}
 
-	// --- Preview: title takes 1 row from the panel area ---
-	// To keep both panels the same outer height:
-	// preview outer = border(2) + previewInnerH = treeOuterH = innerH + 2
-	// so previewInnerH = innerH
-	// But we also need a title row, so we steal 1 row from inner content:
+	// Tree title with scroll bar
+	barWidth := 8
+	treeTitleText := truncate(filepath.Base(m.root.path), treeInnerW-barWidth-3)
+	if len(m.visible) > treeContentH {
+		maxTreeScroll := len(m.visible) - treeContentH
+		if maxTreeScroll < 1 {
+			maxTreeScroll = 1
+		}
+		pct := (m.treeScroll * 100) / maxTreeScroll
+		if pct > 100 {
+			pct = 100
+		}
+		treeTitleText += fmt.Sprintf(" %d%% %s", pct, scrollBar(pct, barWidth))
+	}
+	treeTitle := titleStyle.Width(treeInnerW).Render(treeTitleText)
+	treeBody := buildExactLines(m.buildTreeLines(treeInnerW, treeContentH), treeContentH, treeInnerW)
+	treeInner := treeTitle + "\n" + treeBody
+	treePanel := borderStyle.Width(treeInnerW).Height(innerH).MaxWidth(treeOuterW).MaxHeight(innerH+2).Render(treeInner)
+
+	// --- Preview: title + content ---
 	previewContentH := innerH - 1
 	if previewContentH < 1 {
 		previewContentH = 1
@@ -448,6 +475,7 @@ func (m model) View() string {
 		previewTitle = rel
 	}
 	scrollInfo := ""
+	previewBarWidth := 12
 	if len(m.cachedLines) > previewContentH {
 		maxScroll := len(m.cachedLines) - previewContentH
 		pct := 0
@@ -457,7 +485,7 @@ func (m model) View() string {
 		if pct > 100 {
 			pct = 100
 		}
-		scrollInfo = fmt.Sprintf(" %d%%", pct)
+		scrollInfo = fmt.Sprintf(" %d%% %s", pct, scrollBar(pct, previewBarWidth))
 	}
 	titleText := truncate(previewTitle, previewInnerW-len(scrollInfo)-2) + scrollInfo
 
@@ -830,6 +858,22 @@ func (m *model) reloadTree() {
 	if m.cursor >= len(m.visible) {
 		m.cursor = len(m.visible) - 1
 	}
+}
+
+// scrollBar renders a visual scroll indicator like ━━━━╸─────
+func scrollBar(pct, width int) string {
+	if width < 2 {
+		width = 2
+	}
+	filled := (pct * width) / 100
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+	return strings.Repeat("━", filled) + strings.Repeat("─", empty)
 }
 
 func truncate(s string, maxLen int) string {
